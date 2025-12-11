@@ -61,6 +61,35 @@
         // Usamos um ID fixo para produção
         const appId = 'varzea-manager-prod';
 
+        // --- FUNÇÕES DE UTILITY ---
+
+        // Função para extrair o ID do arquivo de uma URL do Google Drive
+        const getDriveFileId = (url) => {
+            if (!url) return null;
+            // Busca o ID após /d/ ou em um parâmetro id=
+            const match = url.match(/id=([a-zA-Z0-9_-]+)|d\/([a-zA-Z0-9_-]+)/);
+            // Retorna o primeiro grupo de captura que for encontrado
+            return match ? (match[1] || match[2]) : null;
+        };
+
+        // Função para converter uma URL de compartilhamento do Drive para um link de embed direto
+        const convertToDirectDriveLink = (url) => {
+            if (!url || typeof url !== 'string' || !url.includes('drive.google.com')) {
+                return url; // Retorna o original se não for uma URL do Drive
+            }
+            
+            const fileId = getDriveFileId(url);
+            
+            if (fileId) {
+                // FIX FINAL: Usando o padrão lh3.googleusercontent.com/d/{fileId}
+                // Este padrão é mais direto para exibição de imagens.
+                return `https://lh3.googleusercontent.com/d/${fileId}`;
+            }
+            
+            return url; // Retorna o original se o ID não puder ser extraído
+        };
+
+
         // --- Constantes ---
         const POSITIONS = [
             "Goleiro", "Defensor", "Lateral", "Volante", 
@@ -107,7 +136,11 @@
                             src={player.photo} 
                             alt={player.name} 
                             className="w-full h-full object-cover object-top transition-transform duration-500 group-hover:scale-105"
-                            onError={(e) => { e.target.src = 'https://placehold.co/400x400/e2e8f0/1e293b?text=Sem+Foto'; }}
+                            // Garante que o fallback só é acionado se a URL falhar ao carregar
+                            onError={(e) => { 
+                                e.target.onerror = null; // Previne loops de erro
+                                e.target.src = 'https://placehold.co/400x400/e2e8f0/1e293b?text=Sem+Foto'; 
+                            }}
                         />
                     ) : (
                         <div className="w-full h-full flex items-center justify-center bg-gray-100 text-gray-400">
@@ -158,6 +191,7 @@
             useEffect(() => {
                 const initAuth = async () => {
                     try {
+                        // Using signInAnonymously as a default authentication method
                         await signInAnonymously(auth);
                     } catch (error) {
                         console.error("Auth Error:", error);
@@ -177,12 +211,14 @@
             useEffect(() => {
                 if (!user) return;
 
+                // 1. Team Settings
                 const unsubSettings = onSnapshot(
                     doc(db, 'artifacts', appId, 'public', 'data', 'teamSettings', 'config'),
                     (docSnap) => {
                         if (docSnap.exists()) {
                             setTeamInfo(docSnap.data());
                         } else {
+                            // Initialize document if it doesn't exist
                             setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'teamSettings', 'config'), {
                                 name: 'VarzeaManager',
                                 logo: ''
@@ -191,19 +227,31 @@
                     }
                 );
 
+                // 2. Players/Squad
                 const unsubPlayers = onSnapshot(
                     collection(db, 'artifacts', appId, 'public', 'data', 'squad'),
                     (snapshot) => {
                         const p = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-                        // A ordenação aqui ainda prioriza o técnico para o painel administrativo
+                        // Sort players: Technical staff first, then by number
                         setPlayers(p.sort((a, b) => {
-                            if (a.position === 'Técnico' && b.position !== 'Técnico') return -1;
-                            if (b.position === 'Técnico' && a.position !== 'Técnico') return 1;
+                            const aIsStaff = STAFF_POSITIONS.includes(a.position);
+                            const bIsStaff = STAFF_POSITIONS.includes(b.position);
+                            if (aIsStaff && !bIsStaff) return -1;
+                            if (!aIsStaff && bIsStaff) return 1;
+                            
+                            // Staff internal sort (Técnico before Auxiliar)
+                            if (aIsStaff && bIsStaff) {
+                                if (a.position === 'Técnico' && b.position !== 'Técnico') return -1;
+                                if (b.position === 'Técnico' && a.position !== 'Técnico') return 1;
+                            }
+                            
+                            // Players sort by number
                             return parseInt(a.number || '99') - parseInt(b.number || '99');
                         }));
                     }
                 );
 
+                // 3. Sponsors
                 const unsubSponsors = onSnapshot(
                     collection(db, 'artifacts', appId, 'public', 'data', 'sponsors'),
                     (snapshot) => {
@@ -225,10 +273,16 @@
 
             const handleUpdateTeam = async () => {
                 try {
-                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'teamSettings', 'config'), teamInfo);
+                    // Tenta converter o logo para o formato direto, se for do Drive
+                    const convertedLogo = convertToDirectDriveLink(teamInfo.logo);
+                    
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'teamSettings', 'config'), {
+                        ...teamInfo,
+                        logo: convertedLogo
+                    });
                     showToast('Informações do time atualizadas!', 'success');
                 } catch (e) {
-                    console.error(e);
+                    console.error("Erro ao atualizar time:", e);
                     showToast('Erro ao atualizar time.', 'error');
                 }
             };
@@ -240,30 +294,46 @@
                     return;
                 }
 
+                // --- CÓDIGO DE CONVERSÃO DO DRIVE URL ---
+                // Agora usando o padrão lh3.googleusercontent.com
+                const convertedPhoto = convertToDirectDriveLink(playerForm.photo);
+                
+                const dataToSave = {
+                    ...playerForm,
+                    photo: convertedPhoto, // Salva a URL convertida ou a URL original
+                    // Garante que o número é um número ou string vazia
+                    number: playerForm.number ? String(playerForm.number) : ''
+                };
+                // ---------------------------------------------
+
                 try {
                     if (editingPlayerId) {
-                        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'squad', editingPlayerId), playerForm);
+                        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'squad', editingPlayerId), dataToSave);
                         showToast('Jogador atualizado!', 'success');
                     } else {
-                        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'squad'), playerForm);
+                        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'squad'), dataToSave);
                         showToast('Jogador adicionado!', 'success');
                     }
                     setPlayerForm({ name: '', position: 'Atacante', number: '', dob: '', photo: '' });
                     setEditingPlayerId(null);
                 } catch (e) {
-                    console.error(e);
+                    console.error("Erro ao salvar jogador:", e);
                     showToast('Erro ao salvar jogador.', 'error');
                 }
             };
 
             const handleEditClick = (player) => {
                 setEditingPlayerId(player.id);
+                // Ao editar, mostramos a URL salva no formulário (que pode ser a URL convertida)
+                // Se a URL for um link direto do lh3.googleusercontent.com, o próximo save
+                // não a converterá novamente, apenas passará adiante.
                 setPlayerForm({
                     name: player.name || '',
                     position: player.position || 'Atacante',
                     number: player.number || '',
                     dob: player.dob || '',
-                    photo: player.photo || ''
+                    // Exibe a URL salva (já convertida ou não) para o usuário
+                    photo: player.photo || '' 
                 });
                 window.scrollTo({ top: 0, behavior: 'smooth' });
             };
@@ -275,19 +345,23 @@
 
             const handleDeletePlayer = async (id) => {
                 if (!id) return;
-                if (!window.confirm("Remover este membro?")) return;
+                // Use custom modal or simple confirmation to avoid default browser alert blocking
+                // Substituindo alert por um simples confirm, pois não temos um modal customizado
+                if (!window.confirm("Tem certeza que deseja remover este membro?")) return; 
+                
                 try {
                     await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'squad', id));
                     if (editingPlayerId === id) handleCancelEdit();
                     showToast('Removido com sucesso.', 'success');
                 } catch (e) {
+                    console.error("Erro ao deletar jogador:", e);
                     showToast('Erro ao remover.', 'error');
                 }
             };
 
             const handleAddSponsor = async (e) => {
                 e.preventDefault();
-                if (!newSponsor.name) return;
+                if (!newSponsor.name || !newSponsor.value) return;
                 try {
                     await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'sponsors'), {
                         ...newSponsor,
@@ -297,6 +371,7 @@
                     setNewSponsor({ name: '', value: '', paidMonths: [] });
                     showToast('Patrocinador adicionado!', 'success');
                 } catch (e) {
+                    console.error("Erro ao adicionar patrocinador:", e);
                     showToast('Erro ao adicionar.', 'error');
                 }
             };
@@ -311,16 +386,19 @@
                         await updateDoc(sponsorRef, { paidMonths: arrayUnion(paymentKey) });
                     }
                 } catch (e) {
+                    console.error("Erro ao atualizar pagamento:", e);
                     showToast('Erro ao atualizar.', 'error');
                 }
             };
 
             const handleDeleteSponsor = async (id) => {
-                if (!window.confirm("Remover patrocinador?")) return;
+                // Substituindo alert por um simples confirm, pois não temos um modal customizado
+                if (!window.confirm("Tem certeza que deseja remover este patrocinador?")) return;
                 try {
                     await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'sponsors', id));
                     showToast('Patrocinador removido.', 'success');
                 } catch (e) {
+                    console.error("Erro ao deletar patrocinador:", e);
                     showToast('Erro ao remover.', 'error');
                 }
             };
@@ -333,19 +411,16 @@
                 return curr.paidMonths?.includes(currentPaymentKey) ? acc + (curr.value || 0) : acc;
             }, 0);
             
-            // --- NOVA LÓGICA DE FILTRAGEM PARA PÁGINA PÚBLICA ---
+            // FILTRAGEM PARA PÁGINA PÚBLICA
             const staff = players
                 .filter(p => STAFF_POSITIONS.includes(p.position))
                 .sort((a, b) => {
-                    // Ordena Técnico sempre antes de Auxiliar
                     if (a.position === 'Técnico' && b.position === 'Auxiliar') return -1;
                     if (a.position === 'Auxiliar' && b.position === 'Técnico') return 1;
                     return 0;
                 });
 
             const fieldPlayers = players.filter(p => !STAFF_POSITIONS.includes(p.position));
-
-            // -----------------------------------------------------
 
             return (
                 <div className="min-h-screen font-sans text-slate-800">
@@ -357,7 +432,15 @@
                             <div className="flex items-center justify-between h-16">
                                 <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setView('public')}>
                                     {teamInfo.logo ? (
-                                        <img src={teamInfo.logo} alt="Logo" className="h-10 w-10 object-contain bg-white rounded-full p-0.5" />
+                                        <img 
+                                            src={teamInfo.logo} 
+                                            alt="Logo" 
+                                            className="h-10 w-10 object-contain bg-white rounded-full p-0.5" 
+                                            onError={(e) => { 
+                                                e.target.onerror = null; 
+                                                e.target.src = 'https://placehold.co/40x40/e2e8f0/1e293b?text=L'; 
+                                            }}
+                                        />
                                     ) : (
                                         <Shield className="h-8 w-8 text-emerald-400" size={32} weight="fill" />
                                     )}
@@ -388,7 +471,17 @@
                                 <div className="bg-gradient-to-br from-emerald-800 to-emerald-600 rounded-3xl p-8 md:p-12 text-center text-white shadow-xl relative overflow-hidden">
                                     <div className="absolute inset-0 opacity-10 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')]"></div>
                                     <div className="relative z-10 flex flex-col items-center">
-                                        {teamInfo.logo && <img src={teamInfo.logo} className="h-32 w-32 md:h-40 md:w-40 object-contain bg-white rounded-full shadow-lg p-2 mb-6" />}
+                                        {teamInfo.logo && (
+                                            <img 
+                                                src={teamInfo.logo} 
+                                                alt="Logo" 
+                                                className="h-32 w-32 md:h-40 md:w-40 object-contain bg-white rounded-full p-2 mb-6"
+                                                onError={(e) => { 
+                                                    e.target.onerror = null; 
+                                                    e.target.src = 'https://placehold.co/160x160/e2e8f0/1e293b?text=L'; 
+                                                }}
+                                            />
+                                        )}
                                         <h1 className="text-4xl md:text-6xl font-extrabold mb-2 tracking-tight">{teamInfo.name}</h1>
                                         <p className="text-emerald-100 text-lg md:text-xl font-light">Site Oficial do Time</p>
                                     </div>
@@ -444,7 +537,7 @@
                                         <nav className="space-y-1">
                                             <button onClick={() => setAdminTab('squad')} className={`w-full flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-colors ${adminTab === 'squad' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-600 hover:bg-gray-50'}`}><Users className="mr-3 h-5 w-5" /> Plantel</button>
                                             <button onClick={() => setAdminTab('sponsors')} className={`w-full flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-colors ${adminTab === 'sponsors' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-600 hover:bg-gray-50'}`}><CurrencyDollar className="mr-3 h-5 w-5" /> Patrocinadores</button>
-                                            <button onClick={() => setAdminTab('settings')} className={`w-full flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-colors ${adminTab === 'settings' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-600 hover:bg-gray-50'}`}><Gear className="mr-3 h-5 w-5" /> Configurações</button>
+                                            <button onClick={() => setAdminTab('settings')} className={`w-full flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-colors ${adminTab === 'settings' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-600 hover:bg-gray-50'}`}><Gear size={16} /> Configurações</button>
                                         </nav>
                                     </div>
                                 </div>
@@ -458,7 +551,7 @@
                                                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Posição</label><select value={playerForm.position} onChange={e => setPlayerForm({...playerForm, position: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 bg-white focus:ring-2 focus:ring-emerald-500 outline-none">{POSITIONS.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
                                                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Número</label><input type="number" value={playerForm.number} onChange={e => setPlayerForm({...playerForm, number: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" /></div>
                                                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Nascimento</label><input type="date" value={playerForm.dob} onChange={e => setPlayerForm({...playerForm, dob: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" /></div>
-                                                    <div><label className="block text-sm font-medium text-gray-700 mb-1">Foto (URL)</label><input type="url" value={playerForm.photo} onChange={e => setPlayerForm({...playerForm, photo: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" /></div>
+                                                    <div><label className="block text-sm font-medium text-gray-700 mb-1">Foto (URL do Drive ou Imagem)</label><input type="url" value={playerForm.photo} onChange={e => setPlayerForm({...playerForm, photo: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" /></div>
                                                     <div className="md:col-span-2 flex justify-end gap-3 mt-2">
                                                         {editingPlayerId && <button type="button" onClick={handleCancelEdit} className="bg-gray-200 text-gray-700 px-6 py-2 rounded-lg hover:bg-gray-300 font-medium transition-colors flex items-center gap-2"><ArrowCounterClockwise size={18} /> Cancelar</button>}
                                                         <button type="submit" className={`px-6 py-2 rounded-lg font-medium transition-colors flex items-center gap-2 text-white ${editingPlayerId ? 'bg-amber-500 hover:bg-amber-600' : 'bg-emerald-600 hover:bg-emerald-700'}`}>{editingPlayerId ? <><FloppyDisk size={18} /> Salvar</> : <><Plus size={18} /> Cadastrar</>}</button>
@@ -522,6 +615,7 @@
                                                                         <td className="px-6 py-4 text-right"><button onClick={() => handleDeleteSponsor(sponsor.id)} className="text-gray-400 hover:text-red-600"><Trash size={16} /></button></td>
                                                                     </tr>
                                                                 );
+                             
                                                             })}
                                                         </tbody>
                                                     </table>
