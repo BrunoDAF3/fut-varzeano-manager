@@ -34,7 +34,6 @@
         import { createRoot } from 'react-dom/client';
         import { initializeApp } from 'firebase/app';
         
-        // FIX: Imports consolidados para evitar SyntaxError no Babel
         import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
         import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, addDoc, updateDoc, arrayUnion, arrayRemove } from 'firebase/firestore';
         
@@ -67,6 +66,8 @@
             "Goleiro", "Defensor", "Lateral", "Volante", 
             "Meio-Campo", "Atacante", "Técnico", "Auxiliar"
         ];
+        
+        const STAFF_POSITIONS = ["Técnico", "Auxiliar"];
 
         const MONTHS = [
             "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
@@ -194,6 +195,7 @@
                     collection(db, 'artifacts', appId, 'public', 'data', 'squad'),
                     (snapshot) => {
                         const p = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+                        // A ordenação aqui ainda prioriza o técnico para o painel administrativo
                         setPlayers(p.sort((a, b) => {
                             if (a.position === 'Técnico' && b.position !== 'Técnico') return -1;
                             if (b.position === 'Técnico' && a.position !== 'Técnico') return 1;
@@ -330,6 +332,20 @@
             const collectedThisMonth = sponsors.reduce((acc, curr) => {
                 return curr.paidMonths?.includes(currentPaymentKey) ? acc + (curr.value || 0) : acc;
             }, 0);
+            
+            // --- NOVA LÓGICA DE FILTRAGEM PARA PÁGINA PÚBLICA ---
+            const staff = players
+                .filter(p => STAFF_POSITIONS.includes(p.position))
+                .sort((a, b) => {
+                    // Ordena Técnico sempre antes de Auxiliar
+                    if (a.position === 'Técnico' && b.position === 'Auxiliar') return -1;
+                    if (a.position === 'Auxiliar' && b.position === 'Técnico') return 1;
+                    return 0;
+                });
+
+            const fieldPlayers = players.filter(p => !STAFF_POSITIONS.includes(p.position));
+
+            // -----------------------------------------------------
 
             return (
                 <div className="min-h-screen font-sans text-slate-800">
@@ -377,12 +393,38 @@
                                         <p className="text-emerald-100 text-lg md:text-xl font-light">Site Oficial do Time</p>
                                     </div>
                                 </div>
+                                
+                                {/* 1. COMISSÃO TÉCNICA */}
+                                {staff.length > 0 && (
+                                    <div className="pt-4">
+                                        <div className="flex items-center gap-3 mb-8">
+                                            <Users className="text-emerald-700" size={32} weight="fill" />
+                                            <h2 className="text-3xl font-bold text-gray-800">Comissão Técnica</h2>
+                                        </div>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                                            {staff.map(member => <PlayerCard key={member.id} player={member} />)}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* 2. PLANTEL DE JOGADORES */}
                                 <div>
-                                    <div className="flex items-center gap-3 mb-8"><Users className="text-emerald-700" size={32} weight="fill" /><h2 className="text-3xl font-bold text-gray-800">Nosso Elenco</h2></div>
-                                    {players.length === 0 ? <div className="text-center py-20 bg-white rounded-xl border border-dashed border-gray-300"><p className="text-gray-500">Nenhum jogador cadastrado ainda.</p></div> : 
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">{players.map(player => <PlayerCard key={player.id} player={player} />)}</div>
-                                    }
+                                    <div className="flex items-center gap-3 mb-8">
+                                        <Shield className="text-emerald-700" size={32} weight="fill" />
+                                        <h2 className="text-3xl font-bold text-gray-800">Plantel de Jogadores</h2>
+                                    </div>
+                                    {fieldPlayers.length === 0 ? (
+                                        <div className="text-center py-20 bg-white rounded-xl border border-dashed border-gray-300">
+                                            <p className="text-gray-500">Nenhum jogador de linha cadastrado ainda.</p>
+                                        </div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+                                            {fieldPlayers.map(player => <PlayerCard key={player.id} player={player} />)}
+                                        </div>
+                                    )}
                                 </div>
+
+                                {/* Sponsors Footer */}
                                 {sponsors.length > 0 && (
                                     <div className="border-t border-gray-200 pt-10">
                                         <h3 className="text-center text-gray-400 text-sm font-semibold uppercase tracking-widest mb-6">Nossos Parceiros</h3>
