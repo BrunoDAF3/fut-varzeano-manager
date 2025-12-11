@@ -100,6 +100,18 @@
         
         const STAFF_POSITIONS = ["Técnico", "Auxiliar"];
 
+        // Definindo a ordem tática das posições
+        const POSITION_ORDER_MAP = {
+            "Goleiro": 1,
+            "Defensor": 2, 
+            "Lateral": 3,
+            "Volante": 4,
+            "Meio-Campo": 5,
+            "Atacante": 6,
+            "Técnico": 99, 
+            "Auxiliar": 100
+        };
+
         const MONTHS = [
             "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
             "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
@@ -234,17 +246,15 @@
                     collection(db, 'artifacts', appId, 'public', 'data', 'squad'),
                     (snapshot) => {
                         const p = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-                        // Sort players: Technical staff first, then by number
+                        // Ordenação simples para o Painel Admin: Staff no topo, depois por número.
                         setPlayers(p.sort((a, b) => {
                             const aIsStaff = STAFF_POSITIONS.includes(a.position);
                             const bIsStaff = STAFF_POSITIONS.includes(b.position);
                             if (aIsStaff && !bIsStaff) return -1;
                             if (!aIsStaff && bIsStaff) return 1;
                             
-                            // Staff internal sort (Técnico before Auxiliar)
-                            if (a.position === 'Técnico' && b.position !== 'Técnico') return -1;
-                            if (b.position === 'Técnico' && a.position !== 'Técnico') return 1;
-                            return 0;
+                            // Ordena o resto por número
+                            return parseInt(a.number || '999') - parseInt(b.number || '999');
                         }));
                     }
                 );
@@ -293,7 +303,6 @@
                 }
 
                 // --- CÓDIGO DE CONVERSÃO DO DRIVE URL ---
-                // Agora usando o padrão lh3.googleusercontent.com
                 const convertedPhoto = convertToDirectDriveLink(playerForm.photo);
                 
                 const dataToSave = {
@@ -405,16 +414,34 @@
                 return curr.paidMonths?.includes(currentPaymentKey) ? acc + (curr.value || 0) : acc;
             }, 0);
             
-            // FILTRAGEM PARA PÁGINA PÚBLICA
+            // FILTRAGEM E ORDENAÇÃO PARA PÁGINA PÚBLICA
+
+            // 1. Comissão Técnica
             const staff = players
                 .filter(p => STAFF_POSITIONS.includes(p.position))
+                // Ordenação: Técnico antes de Auxiliar
                 .sort((a, b) => {
                     if (a.position === 'Técnico' && b.position === 'Auxiliar') return -1;
                     if (a.position === 'Auxiliar' && b.position === 'Técnico') return 1;
                     return 0;
                 });
 
-            const fieldPlayers = players.filter(p => !STAFF_POSITIONS.includes(p.position));
+            // 2. Plantel de Jogadores (Ordenação Tática)
+            const fieldPlayers = players
+                .filter(p => !STAFF_POSITIONS.includes(p.position))
+                .sort((a, b) => {
+                    const orderA = POSITION_ORDER_MAP[a.position] || 999;
+                    const orderB = POSITION_ORDER_MAP[b.position] || 999;
+
+                    // Ordenação principal: por ordem de posição (Goleiro=1, Atacante=6, etc.)
+                    if (orderA !== orderB) {
+                        return orderA - orderB;
+                    }
+
+                    // Ordenação secundária: por número da camisa (para posições iguais)
+                    return parseInt(a.number || '999') - parseInt(b.number || '999');
+                });
+
 
             return (
                 <div className="min-h-screen font-sans text-slate-800">
