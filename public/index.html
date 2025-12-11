@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VarzeaManager</title>
     
+    <!-- FAVICON ADICIONADO AQUI -->
+    <link rel="icon" type="image/svg+xml" href="https://placehold.co/16x16/047857/ffffff?text=🛡️">
+    
     <!-- Tailwind CSS (Estilização) -->
     <script src="https://cdn.tailwindcss.com"></script>
     
@@ -72,17 +75,16 @@
             return match ? (match[1] || match[2]) : null;
         };
 
-        // Função para converter uma URL de compartilhamento do Drive para um link de embed direto
+        // Função para converter uma URL de compartilhamento do Drive para um link de asset direto (lh3)
         const convertToDirectDriveLink = (url) => {
             if (!url || typeof url !== 'string' || !url.includes('drive.google.com')) {
-                return url; // Retorna o original se não for uma URL do Drive
+                return url; // Retorna o original se não for uma URL do Drive ou se já for lh3
             }
             
             const fileId = getDriveFileId(url);
             
             if (fileId) {
-                // FIX FINAL: Usando o padrão lh3.googleusercontent.com/d/{fileId}
-                // Este padrão é mais direto para exibição de imagens.
+                // Usando o padrão lh3.googleusercontent.com/d/{fileId}
                 return `https://lh3.googleusercontent.com/d/${fileId}`;
             }
             
@@ -240,13 +242,9 @@
                             if (!aIsStaff && bIsStaff) return 1;
                             
                             // Staff internal sort (Técnico before Auxiliar)
-                            if (aIsStaff && bIsStaff) {
-                                if (a.position === 'Técnico' && b.position !== 'Técnico') return -1;
-                                if (b.position === 'Técnico' && a.position !== 'Técnico') return 1;
-                            }
-                            
-                            // Players sort by number
-                            return parseInt(a.number || '99') - parseInt(b.number || '99');
+                            if (a.position === 'Técnico' && b.position !== 'Técnico') return -1;
+                            if (b.position === 'Técnico' && a.position !== 'Técnico') return 1;
+                            return 0;
                         }));
                     }
                 );
@@ -325,8 +323,6 @@
             const handleEditClick = (player) => {
                 setEditingPlayerId(player.id);
                 // Ao editar, mostramos a URL salva no formulário (que pode ser a URL convertida)
-                // Se a URL for um link direto do lh3.googleusercontent.com, o próximo save
-                // não a converterá novamente, apenas passará adiante.
                 setPlayerForm({
                     name: player.name || '',
                     position: player.position || 'Atacante',
@@ -346,7 +342,6 @@
             const handleDeletePlayer = async (id) => {
                 if (!id) return;
                 // Use custom modal or simple confirmation to avoid default browser alert blocking
-                // Substituindo alert por um simples confirm, pois não temos um modal customizado
                 if (!window.confirm("Tem certeza que deseja remover este membro?")) return; 
                 
                 try {
@@ -392,7 +387,6 @@
             };
 
             const handleDeleteSponsor = async (id) => {
-                // Substituindo alert por um simples confirm, pois não temos um modal customizado
                 if (!window.confirm("Tem certeza que deseja remover este patrocinador?")) return;
                 try {
                     await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'sponsors', id));
