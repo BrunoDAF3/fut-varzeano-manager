@@ -1,6 +1,10 @@
 {
   "hosting": {
+
+    "site": "fut-varzeano-manager",
+
     "public": "public",
+
     "ignore": [
       "firebase.json",
       "**/.*",

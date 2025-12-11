@@ -1,833 +1,531 @@
-import React, { useState, useEffect } from 'react';
-import { initializeApp } from 'firebase/app';
-import { 
-  getAuth, 
-  signInAnonymously, 
-  onAuthStateChanged,
-  signInWithCustomToken,
-  User as FirebaseUser
-} from 'firebase/auth';
-import { 
-  getFirestore, 
-  collection, 
-  doc, 
-  setDoc, 
-  deleteDoc, 
-  onSnapshot, 
-  addDoc, 
-  updateDoc,
-  arrayUnion,
-  arrayRemove
-} from 'firebase/firestore';
-import { 
-  Users, 
-  DollarSign, 
-  Shield, 
-  Settings, 
-  Plus, 
-  Trash2, 
-  User, 
-  Calendar, 
-  CheckCircle, 
-  XCircle,
-  Menu,
-  X,
-  Pencil,
-  Save,
-  RotateCcw
-} from 'lucide-react';
-
-// --- Global Declarations for Environment Variables ---
-declare const __firebase_config: string;
-declare const __app_id: string;
-declare const __initial_auth_token: string | undefined;
-
-// --- Interfaces & Types ---
-
-interface TeamSettings {
-  name: string;
-  logo: string;
-}
-
-interface Player {
-  id: string;
-  name: string;
-  position: string;
-  number: string;
-  dob: string;
-  photo: string;
-}
-
-// Omit 'id' for the form state since new players don't have one yet
-type PlayerFormData = Omit<Player, 'id'>;
-
-interface Sponsor {
-  id: string;
-  name: string;
-  value: number;
-  paidMonths: string[];
-}
-
-type SponsorFormData = {
-  name: string;
-  value: string; // Keep as string for input handling, convert to number on save
-  paidMonths: string[];
-};
-
-interface ToastState {
-  message: string;
-  type: 'success' | 'error' | 'info' | '';
-}
-
-// --- Firebase Configuration ---
-const firebaseConfig = JSON.parse(__firebase_config);
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-
-// --- Constants ---
-const POSITIONS: string[] = [
-  "Goleiro", 
-  "Defensor", 
-  "Lateral", 
-  "Volante", 
-  "Meio-Campo", 
-  "Atacante", 
-  "Técnico", 
-  "Auxiliar"
-];
-
-const MONTHS: string[] = [
-  "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
-  "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
-];
-
-// --- Components ---
-
-// Simple Toast Notification
-interface ToastProps {
-  message: string;
-  type: string;
-  onClose: () => void;
-}
-
-const Toast: React.FC<ToastProps> = ({ message, type, onClose }) => {
-  useEffect(() => {
-    const timer = setTimeout(onClose, 3000);
-    return () => clearTimeout(timer);
-  }, [onClose]);
-
-  if (!message) return null;
-
-  const bgColors: Record<string, string> = {
-    success: 'bg-green-500',
-    error: 'bg-red-500',
-    info: 'bg-blue-500'
-  };
-
-  return (
-    <div className={`fixed bottom-4 right-4 ${bgColors[type] || 'bg-gray-800'} text-white px-6 py-3 rounded-lg shadow-xl z-50 animate-bounce-in flex items-center gap-2`}>
-      {type === 'success' && <CheckCircle size={20} />}
-      {type === 'error' && <XCircle size={20} />}
-      {message}
-    </div>
-  );
-};
-
-// Player Card Component (Public View)
-const PlayerCard: React.FC<{ player: Player }> = ({ player }) => (
-  <div className="bg-white rounded-xl shadow-md overflow-hidden hover:shadow-lg transition-shadow border border-gray-100 group relative">
-    <div className="h-48 bg-gray-200 relative overflow-hidden">
-      {player.photo ? (
-        <img 
-          src={player.photo} 
-          alt={player.name} 
-          className="w-full h-full object-cover object-top transition-transform duration-500 group-hover:scale-105"
-          onError={(e) => { (e.target as HTMLImageElement).src = 'https://placehold.co/400x400/e2e8f0/1e293b?text=Sem+Foto'; }}
-        />
-      ) : (
-        <div className="w-full h-full flex items-center justify-center bg-gray-100 text-gray-400">
-          <User size={64} />
-        </div>
-      )}
-      <div className="absolute top-2 right-2 bg-black/70 text-white font-bold text-sm px-2 py-1 rounded-md">
-        #{player.number || '00'}
-      </div>
-    </div>
-    <div className="p-4">
-      <div className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-1">
-        {player.position}
-      </div>
-      <h3 className="font-bold text-gray-800 text-lg leading-tight truncate">{player.name}</h3>
-      <p className="text-gray-500 text-sm mt-1">
-        {player.dob ? `${new Date().getFullYear() - new Date(player.dob).getFullYear()} anos` : 'Idade N/A'}
-      </p>
-    </div>
-  </div>
-);
-
-// Main Application Component
-export default function TeamManagerApp() {
-  const [user, setUser] = useState<FirebaseUser | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [view, setView] = useState<'public' | 'admin'>('public');
-  const [adminTab, setAdminTab] = useState<'squad' | 'sponsors' | 'settings'>('squad');
-  const [toast, setToast] = useState<ToastState>({ message: '', type: '' });
-  
-  // Data States
-  const [teamInfo, setTeamInfo] = useState<TeamSettings>({ name: 'VarzeaManager', logo: '' });
-  const [players, setPlayers] = useState<Player[]>([]);
-  const [sponsors, setSponsors] = useState<Sponsor[]>([]);
-  
-  // Admin Form States
-  const [editingPlayerId, setEditingPlayerId] = useState<string | null>(null);
-  const [playerForm, setPlayerForm] = useState<PlayerFormData>({ 
-    name: '', 
-    position: 'Atacante', 
-    number: '', 
-    dob: '', 
-    photo: '' 
-  });
-  
-  const [newSponsor, setNewSponsor] = useState<SponsorFormData>({ name: '', value: '', paidMonths: [] });
-  const [selectedMonth, setSelectedMonth] = useState<number>(new Date().getMonth());
-  const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear());
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
-
-  // --- Initialization & Auth ---
-  useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (error) {
-        console.error("Auth Error:", error);
-      }
-    };
-    initAuth();
-
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  // --- Data Fetching ---
-  useEffect(() => {
-    if (!user) return;
-
-    // Fetch Team Settings
-    const unsubSettings = onSnapshot(
-      doc(db, 'artifacts', appId, 'public', 'data', 'teamSettings', 'config'),
-      (docSnap) => {
-        if (docSnap.exists()) {
-          setTeamInfo(docSnap.data() as TeamSettings);
-        } else {
-          setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'teamSettings', 'config'), {
-            name: 'VarzeaManager',
-            logo: ''
-          });
-        }
-      }
-    );
-
-    // Fetch Players
-    const unsubPlayers = onSnapshot(
-      collection(db, 'artifacts', appId, 'public', 'data', 'squad'),
-      (snapshot) => {
-        const p = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Player));
-        // Sort: Staff first, then by Number
-        setPlayers(p.sort((a, b) => {
-          if (a.position === 'Técnico' && b.position !== 'Técnico') return -1;
-          if (b.position === 'Técnico' && a.position !== 'Técnico') return 1;
-          return parseInt(a.number || '99') - parseInt(b.number || '99');
-        }));
-      }
-    );
-
-    // Fetch Sponsors
-    const unsubSponsors = onSnapshot(
-      collection(db, 'artifacts', appId, 'public', 'data', 'sponsors'),
-      (snapshot) => {
-        setSponsors(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Sponsor)));
-      }
-    );
-
-    return () => {
-      unsubSettings();
-      unsubPlayers();
-      unsubSponsors();
-    };
-  }, [user]);
-
-  // --- Handlers ---
-
-  const showToast = (msg: string, type: 'success' | 'error' | 'info' = 'info') => {
-    setToast({ message: msg, type });
-  };
-
-  const handleUpdateTeam = async () => {
-    try {
-      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'teamSettings', 'config'), teamInfo);
-      showToast('Informações do time atualizadas!', 'success');
-    } catch (e) {
-      console.error(e);
-      showToast('Erro ao atualizar time.', 'error');
-    }
-  };
-
-  // --- Player Management Handlers ---
-
-  const handleSavePlayer = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!playerForm.name || !playerForm.position) {
-      showToast('Preencha nome e posição!', 'error');
-      return;
-    }
-
-    try {
-      if (editingPlayerId) {
-        // UPDATE Existing
-        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'squad', editingPlayerId), playerForm as any);
-        showToast('Jogador atualizado com sucesso!', 'success');
-      } else {
-        // CREATE New
-        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'squad'), playerForm);
-        showToast('Jogador adicionado!', 'success');
-      }
-      // Reset Form
-      setPlayerForm({ name: '', position: 'Atacante', number: '', dob: '', photo: '' });
-      setEditingPlayerId(null);
-    } catch (e) {
-      console.error(e);
-      showToast('Erro ao salvar jogador.', 'error');
-    }
-  };
-
-  const handleEditClick = (player: Player) => {
-    setEditingPlayerId(player.id);
-    setPlayerForm({
-      name: player.name || '',
-      position: player.position || 'Atacante',
-      number: player.number || '',
-      dob: player.dob || '',
-      photo: player.photo || ''
-    });
-    // Scroll to top of form
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
-  const handleCancelEdit = () => {
-    setEditingPlayerId(null);
-    setPlayerForm({ name: '', position: 'Atacante', number: '', dob: '', photo: '' });
-  };
-
-  const handleDeletePlayer = async (id: string) => {
-    if (!id) return;
-    if (!window.confirm("Tem certeza que deseja remover este membro do elenco?")) return;
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VarzeaManager</title>
     
-    try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'squad', id));
-      
-      // If we were editing this user, reset the form
-      if (editingPlayerId === id) {
-        handleCancelEdit();
-      }
-      
-      showToast('Removido com sucesso.', 'success');
-    } catch (e) {
-      console.error("Delete Error:", e);
-      showToast('Erro ao remover. Tente recarregar a página.', 'error');
-    }
-  };
-
-  // --- Sponsor Handlers ---
-
-  const handleAddSponsor = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newSponsor.name) return;
-    try {
-      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'sponsors'), {
-        ...newSponsor,
-        value: parseFloat(newSponsor.value) || 0,
-        paidMonths: []
-      });
-      setNewSponsor({ name: '', value: '', paidMonths: [] });
-      showToast('Patrocinador adicionado!', 'success');
-    } catch (e) {
-      showToast('Erro ao adicionar patrocinador.', 'error');
-    }
-  };
-
-  const handleTogglePayment = async (sponsorId: string, currentPaidStatus: boolean) => {
-    const paymentKey = `${selectedYear}-${selectedMonth}`;
-    const sponsorRef = doc(db, 'artifacts', appId, 'public', 'data', 'sponsors', sponsorId);
+    <!-- Tailwind CSS (Estilização) -->
+    <script src="https://cdn.tailwindcss.com"></script>
     
-    try {
-      if (currentPaidStatus) {
-        await updateDoc(sponsorRef, {
-          paidMonths: arrayRemove(paymentKey)
-        });
-      } else {
-        await updateDoc(sponsorRef, {
-          paidMonths: arrayUnion(paymentKey)
-        });
+    <!-- Babel (Para entender JSX no navegador) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Import Map: Define de onde vêm os "imports" do código -->
+    <!-- FIX: Adicionado '?external=react,react-dom' para evitar conflito de versões do React -->
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "@phosphor-icons/react": "https://esm.sh/@phosphor-icons/react@2.0.15?external=react,react-dom",
+        "firebase/app": "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js",
+        "firebase/auth": "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js",
+        "firebase/firestore": "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js"
       }
-    } catch (e) {
-      showToast('Erro ao atualizar pagamento.', 'error');
     }
-  };
+    </script>
+</head>
+<body class="bg-slate-50">
+    <div id="root"></div>
 
-  const handleDeleteSponsor = async (id: string) => {
-    if (!window.confirm("Remover este patrocinador?")) return;
-    try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'sponsors', id));
-      showToast('Patrocinador removido.', 'success');
-    } catch (e) {
-      showToast('Erro ao remover.', 'error');
-    }
-  };
-
-  // --- Render Helpers ---
-
-  if (loading) return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-600"></div></div>;
-
-  const currentPaymentKey = `${selectedYear}-${selectedMonth}`;
-  
-  const totalRevenue = sponsors.reduce((acc, curr) => acc + (curr.value || 0), 0);
-  const collectedThisMonth = sponsors.reduce((acc, curr) => {
-    return curr.paidMonths?.includes(currentPaymentKey) ? acc + (curr.value || 0) : acc;
-  }, 0);
-
-  return (
-    <div className="min-h-screen bg-slate-50 font-sans text-slate-800">
-      <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: '', type: '' })} />
-
-      {/* Navigation Bar */}
-      <nav className="bg-emerald-900 text-white shadow-lg sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            {/* Logo Area */}
-            <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setView('public')}>
-               {teamInfo.logo ? (
-                  <img src={teamInfo.logo} alt="Logo" className="h-10 w-10 object-contain bg-white rounded-full p-0.5" />
-               ) : (
-                  <Shield className="h-8 w-8 text-emerald-400" />
-               )}
-               <span className="font-bold text-xl tracking-tight hidden sm:block">{teamInfo.name || 'VarzeaManager'}</span>
-            </div>
-
-            {/* Desktop Menu */}
-            <div className="hidden md:flex items-center space-x-4">
-              <button 
-                onClick={() => setView('public')}
-                className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${view === 'public' ? 'bg-emerald-800 text-white' : 'text-emerald-100 hover:bg-emerald-800'}`}
-              >
-                Página Pública
-              </button>
-              <button 
-                onClick={() => setView('admin')}
-                className={`px-3 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${view === 'admin' ? 'bg-emerald-800 text-white' : 'text-emerald-100 hover:bg-emerald-800'}`}
-              >
-                <Settings size={16} />
-                Área Administrativa
-              </button>
-            </div>
-
-            {/* Mobile Menu Button */}
-            <div className="md:hidden">
-              <button onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)} className="text-emerald-100 hover:text-white">
-                {isMobileMenuOpen ? <X /> : <Menu />}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Mobile Menu Dropdown */}
-        {isMobileMenuOpen && (
-          <div className="md:hidden bg-emerald-800 px-2 pt-2 pb-3 space-y-1 sm:px-3">
-            <button 
-              onClick={() => { setView('public'); setIsMobileMenuOpen(false); }}
-              className="block w-full text-left px-3 py-2 rounded-md text-base font-medium text-white hover:bg-emerald-700"
-            >
-              Página Pública
-            </button>
-            <button 
-              onClick={() => { setView('admin'); setIsMobileMenuOpen(false); }}
-              className="block w-full text-left px-3 py-2 rounded-md text-base font-medium text-white hover:bg-emerald-700"
-            >
-              Área Administrativa
-            </button>
-          </div>
-        )}
-      </nav>
-
-      {/* MAIN CONTENT */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <!-- Nosso Código da Aplicação -->
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { initializeApp } from 'firebase/app';
+        import { 
+            getAuth, 
+            signInAnonymously, // Mantido
+            onAuthStateChanged,
+            // signInWithCustomToken removido
+        } from 'firebase/auth';
+        import { 
+            getFirestore, 
+            collection, 
+            doc, 
+            setDoc, 
+            deleteDoc, 
+            onSnapshot, 
+            addDoc, 
+            updateDoc, 
+            arrayUnion, 
+            arrayRemove 
+        } from 'firebase/firestore';
         
-        {/* === PUBLIC VIEW === */}
-        {view === 'public' && (
-          <div className="space-y-12">
-            
-            {/* Hero Section */}
-            <div className="bg-gradient-to-br from-emerald-800 to-emerald-600 rounded-3xl p-8 md:p-12 text-center text-white shadow-xl relative overflow-hidden">
-               {/* Pattern overlay */}
-               <div className="absolute inset-0 opacity-10 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')]"></div>
-               
-               <div className="relative z-10 flex flex-col items-center">
-                 {teamInfo.logo && (
-                   <img 
-                      src={teamInfo.logo} 
-                      alt="Team Logo" 
-                      className="h-32 w-32 md:h-40 md:w-40 object-contain bg-white rounded-full shadow-lg p-2 mb-6"
-                    />
-                 )}
-                 <h1 className="text-4xl md:text-6xl font-extrabold mb-2 tracking-tight">{teamInfo.name || 'VarzeaManager'}</h1>
-                 <p className="text-emerald-100 text-lg md:text-xl font-light">Site Oficial do Time</p>
-               </div>
-            </div>
+        import { 
+            Users, CurrencyDollar, Shield, Gear, Plus, Trash, User, 
+            CalendarBlank, CheckCircle, XCircle, List, X, PencilSimple, FloppyDisk, ArrowCounterClockwise 
+        } from '@phosphor-icons/react';
 
-            {/* Squad Grid */}
-            <div>
-              <div className="flex items-center gap-3 mb-8">
-                <Users className="text-emerald-700" size={32} />
-                <h2 className="text-3xl font-bold text-gray-800">Nosso Elenco</h2>
-              </div>
-              
-              {players.length === 0 ? (
-                <div className="text-center py-20 bg-white rounded-xl border border-dashed border-gray-300">
-                  <p className="text-gray-500">Nenhum jogador cadastrado ainda.</p>
+        // --- ⚠️ CONFIGURAÇÃO DO FIREBASE ⚠️ ---
+        
+        const firebaseConfig = {
+            apiKey: "AIzaSyB1p3QtCgJDRqQhPm-ZdRfA-tD_-T8_Z9E",
+            authDomain: "fut-varzeano-manager.firebaseapp.com",
+            projectId: "fut-varzeano-manager",
+            storageBucket: "fut-varzeano-manager.firebasestorage.app",
+            messagingSenderId: "819431327240",
+            appId: "1:819431327240:web:93547464470885dada73bd"
+        };
+
+        // Inicialização
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        
+        // Usamos um ID fixo para produção
+        const appId = 'varzea-manager-prod';
+
+        // --- Constantes ---
+        const POSITIONS = [
+            "Goleiro", "Defensor", "Lateral", "Volante", 
+            "Meio-Campo", "Atacante", "Técnico", "Auxiliar"
+        ];
+
+        const MONTHS = [
+            "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+            "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
+        ];
+
+        // --- Componentes ---
+
+        const Toast = ({ message, type, onClose }) => {
+            useEffect(() => {
+                const timer = setTimeout(onClose, 3000);
+                return () => clearTimeout(timer);
+            }, [onClose]);
+
+            if (!message) return null;
+
+            const bgColors = {
+                success: 'bg-green-500',
+                error: 'bg-red-500',
+                info: 'bg-blue-500'
+            };
+
+            return (
+                <div className={`fixed bottom-4 right-4 ${bgColors[type] || 'bg-gray-800'} text-white px-6 py-3 rounded-lg shadow-xl z-50 flex items-center gap-2`}>
+                    {type === 'success' && <CheckCircle size={20} weight="fill" />}
+                    {type === 'error' && <XCircle size={20} weight="fill" />}
+                    {message}
                 </div>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-                  {players.map(player => (
-                    <PlayerCard key={player.id} player={player} />
-                  ))}
-                </div>
-              )}
-            </div>
+            );
+        };
 
-            {/* Sponsors Footer */}
-            {sponsors.length > 0 && (
-              <div className="border-t border-gray-200 pt-10">
-                <h3 className="text-center text-gray-400 text-sm font-semibold uppercase tracking-widest mb-6">Nossos Parceiros</h3>
-                <div className="flex flex-wrap justify-center gap-8 opacity-70 grayscale hover:grayscale-0 transition-all duration-500">
-                   {sponsors.map(s => (
-                     <div key={s.id} className="text-xl font-bold text-emerald-800 flex items-center gap-2">
-                       <div className="h-2 w-2 bg-emerald-500 rounded-full"></div>
-                       {s.name}
-                     </div>
-                   ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* === ADMIN VIEW === */}
-        {view === 'admin' && (
-          <div className="flex flex-col lg:flex-row gap-6">
-            
-            {/* Sidebar / Tabs */}
-            <div className="lg:w-64 flex-shrink-0">
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sticky top-24">
-                <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-4 px-2">Gerenciamento</h3>
-                <nav className="space-y-1">
-                  <button
-                    onClick={() => setAdminTab('squad')}
-                    className={`w-full flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-colors ${adminTab === 'squad' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-600 hover:bg-gray-50'}`}
-                  >
-                    <Users className="mr-3 h-5 w-5" />
-                    Plantel (Jogadores)
-                  </button>
-                  <button
-                    onClick={() => setAdminTab('sponsors')}
-                    className={`w-full flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-colors ${adminTab === 'sponsors' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-600 hover:bg-gray-50'}`}
-                  >
-                    <DollarSign className="mr-3 h-5 w-5" />
-                    Patrocinadores
-                  </button>
-                  <button
-                    onClick={() => setAdminTab('settings')}
-                    className={`w-full flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-colors ${adminTab === 'settings' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-600 hover:bg-gray-50'}`}
-                  >
-                    <Settings className="mr-3 h-5 w-5" />
-                    Configurações
-                  </button>
-                </nav>
-              </div>
-            </div>
-
-            {/* Admin Content Area */}
-            <div className="flex-1">
-              
-              {/* SQUAD MANAGER */}
-              {adminTab === 'squad' && (
-                <div className="space-y-6">
-                  {/* Form Card */}
-                  <div className={`bg-white rounded-xl shadow-sm border transition-all duration-300 p-6 ${editingPlayerId ? 'border-amber-300 ring-2 ring-amber-100' : 'border-gray-200'}`}>
-                    <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                      {editingPlayerId ? (
-                        <><Pencil className="text-amber-500" /> Editando Jogador</>
-                      ) : (
-                        <><Plus className="text-emerald-600" /> Cadastrar Novo Membro</>
-                      )}
-                    </h2>
-                    
-                    <form onSubmit={handleSavePlayer} className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div className="md:col-span-2">
-                         <label className="block text-sm font-medium text-gray-700 mb-1">Nome Completo</label>
-                         <input required type="text" value={playerForm.name} onChange={e => setPlayerForm({...playerForm, name: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" placeholder="Ex: João da Silva" />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Posição</label>
-                        <select value={playerForm.position} onChange={e => setPlayerForm({...playerForm, position: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 bg-white focus:ring-2 focus:ring-emerald-500 outline-none">
-                          {POSITIONS.map(p => <option key={p} value={p}>{p}</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Número da Camisa</label>
-                        <input type="number" value={playerForm.number} onChange={e => setPlayerForm({...playerForm, number: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" placeholder="Ex: 10" />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Data de Nascimento</label>
-                        <input type="date" value={playerForm.dob} onChange={e => setPlayerForm({...playerForm, dob: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Foto (URL)</label>
-                        <input type="url" value={playerForm.photo} onChange={e => setPlayerForm({...playerForm, photo: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" placeholder="https://..." />
-                      </div>
-                      
-                      {/* Action Buttons */}
-                      <div className="md:col-span-2 flex justify-end gap-3 mt-2">
-                        {editingPlayerId && (
-                          <button 
-                            type="button" 
-                            onClick={handleCancelEdit}
-                            className="bg-gray-200 text-gray-700 px-6 py-2 rounded-lg hover:bg-gray-300 font-medium transition-colors flex items-center gap-2"
-                          >
-                            <RotateCcw size={18} /> Cancelar
-                          </button>
-                        )}
-                        <button 
-                          type="submit" 
-                          className={`px-6 py-2 rounded-lg font-medium transition-colors flex items-center gap-2 text-white ${editingPlayerId ? 'bg-amber-500 hover:bg-amber-600' : 'bg-emerald-600 hover:bg-emerald-700'}`}
-                        >
-                          {editingPlayerId ? <><Save size={18} /> Salvar Alterações</> : <><Plus size={18} /> Cadastrar Membro</>}
-                        </button>
-                      </div>
-                    </form>
-                  </div>
-
-                  <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                    <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
-                      <h2 className="font-bold text-gray-700">Membros Ativos ({players.length})</h2>
-                    </div>
-                    <ul className="divide-y divide-gray-200">
-                      {players.map(player => (
-                        <li key={player.id} className={`px-6 py-4 flex items-center justify-between hover:bg-gray-50 transition-colors ${editingPlayerId === player.id ? 'bg-amber-50' : ''}`}>
-                          <div className="flex items-center gap-4">
-                            <div className="h-10 w-10 rounded-full bg-gray-200 overflow-hidden flex-shrink-0">
-                               {player.photo ? <img src={player.photo} className="h-full w-full object-cover" /> : <User className="p-2 text-gray-400 h-full w-full" />}
-                            </div>
-                            <div>
-                              <p className="font-medium text-gray-900">{player.name} {editingPlayerId === player.id && <span className="text-xs text-amber-600 font-bold ml-2">(Editando...)</span>}</p>
-                              <p className="text-sm text-gray-500">{player.position} • Camisa {player.number}</p>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <button 
-                              onClick={() => handleEditClick(player)}
-                              className="p-2 text-gray-400 hover:text-amber-500 hover:bg-amber-50 rounded-full transition-colors"
-                              title="Editar"
-                            >
-                              <Pencil size={18} />
-                            </button>
-                            <button 
-                              onClick={() => handleDeletePlayer(player.id)} 
-                              className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
-                              title="Excluir"
-                            >
-                              <Trash2 size={18} />
-                            </button>
-                          </div>
-                        </li>
-                      ))}
-                      {players.length === 0 && <li className="px-6 py-8 text-center text-gray-400 italic">Lista vazia.</li>}
-                    </ul>
-                  </div>
-                </div>
-              )}
-
-              {/* SPONSORS MANAGER */}
-              {adminTab === 'sponsors' && (
-                <div className="space-y-6">
-                  {/* Stats Cards */}
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200">
-                      <p className="text-sm text-gray-500 uppercase font-bold">Total Mensal Previsto</p>
-                      <p className="text-2xl font-bold text-gray-800">R$ {totalRevenue.toFixed(2)}</p>
-                    </div>
-                    <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200">
-                      <p className="text-sm text-gray-500 uppercase font-bold">Arrecadado ({MONTHS[selectedMonth]})</p>
-                      <p className={`text-2xl font-bold ${collectedThisMonth < totalRevenue ? 'text-amber-600' : 'text-emerald-600'}`}>
-                        R$ {collectedThisMonth.toFixed(2)}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Add Sponsor Form */}
-                  <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                    <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                       <DollarSign className="text-emerald-600" /> Novo Patrocinador
-                    </h2>
-                    <form onSubmit={handleAddSponsor} className="flex flex-col md:flex-row gap-4 items-end">
-                      <div className="flex-1 w-full">
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Nome da Empresa/Pessoa</label>
-                        <input required type="text" value={newSponsor.name} onChange={e => setNewSponsor({...newSponsor, name: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" placeholder="Padaria Central" />
-                      </div>
-                      <div className="w-full md:w-48">
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Valor Mensal (R$)</label>
-                        <input required type="number" step="0.01" value={newSponsor.value} onChange={e => setNewSponsor({...newSponsor, value: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" placeholder="100.00" />
-                      </div>
-                      <button type="submit" className="w-full md:w-auto bg-emerald-600 text-white px-6 py-2 rounded-lg hover:bg-emerald-700 font-medium transition-colors">Adicionar</button>
-                    </form>
-                  </div>
-
-                  {/* Control Panel */}
-                  <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-                    <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
-                      <h2 className="font-bold text-gray-700">Controle de Pagamentos</h2>
-                      <div className="flex items-center gap-2 bg-white px-3 py-1 rounded-md border border-gray-300">
-                        <Calendar size={16} className="text-gray-500" />
-                        <select 
-                          value={selectedMonth} 
-                          onChange={(e) => setSelectedMonth(parseInt(e.target.value))}
-                          className="bg-transparent text-sm font-medium outline-none text-gray-700 cursor-pointer"
-                        >
-                          {MONTHS.map((m, i) => <option key={i} value={i}>{m}</option>)}
-                        </select>
-                        <select 
-                          value={selectedYear} 
-                          onChange={(e) => setSelectedYear(parseInt(e.target.value))}
-                          className="bg-transparent text-sm font-medium outline-none text-gray-700 cursor-pointer border-l border-gray-200 pl-2"
-                        >
-                          <option value={2024}>2024</option>
-                          <option value={2025}>2025</option>
-                          <option value={2026}>2026</option>
-                        </select>
-                      </div>
-                    </div>
-                    
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left text-sm">
-                        <thead className="bg-gray-50 text-gray-500 font-medium uppercase tracking-wider">
-                          <tr>
-                            <th className="px-6 py-3">Patrocinador</th>
-                            <th className="px-6 py-3">Valor</th>
-                            <th className="px-6 py-3 text-center">Status ({MONTHS[selectedMonth]})</th>
-                            <th className="px-6 py-3 text-right">Ações</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-200">
-                          {sponsors.map(sponsor => {
-                            const isPaid = sponsor.paidMonths?.includes(currentPaymentKey);
-                            return (
-                              <tr key={sponsor.id} className="hover:bg-gray-50 transition-colors">
-                                <td className="px-6 py-4 font-medium text-gray-900">{sponsor.name}</td>
-                                <td className="px-6 py-4 text-gray-600">R$ {sponsor.value?.toFixed(2)}</td>
-                                <td className="px-6 py-4 text-center">
-                                  <button 
-                                    onClick={() => handleTogglePayment(sponsor.id, !!isPaid)}
-                                    className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold border transition-all ${isPaid ? 'bg-green-100 text-green-700 border-green-200 hover:bg-green-200' : 'bg-red-50 text-red-600 border-red-200 hover:bg-red-100'}`}
-                                  >
-                                    {isPaid ? <CheckCircle size={14} /> : <XCircle size={14} />}
-                                    {isPaid ? 'PAGO' : 'PENDENTE'}
-                                  </button>
-                                </td>
-                                <td className="px-6 py-4 text-right">
-                                  <button onClick={() => handleDeleteSponsor(sponsor.id)} className="text-gray-400 hover:text-red-600">
-                                    <Trash2 size={16} />
-                                  </button>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                          {sponsors.length === 0 && (
-                            <tr><td colSpan={4} className="px-6 py-8 text-center text-gray-400 italic">Sem patrocinadores cadastrados.</td></tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* TEAM SETTINGS */}
-              {adminTab === 'settings' && (
-                <div className="max-w-2xl mx-auto space-y-6">
-                  <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-8">
-                    <h2 className="text-xl font-bold text-gray-800 mb-6 pb-2 border-b border-gray-100">Identidade do Time</h2>
-                    <div className="space-y-4">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Nome do Time</label>
-                        <input 
-                          type="text" 
-                          value={teamInfo.name} 
-                          onChange={(e) => setTeamInfo({...teamInfo, name: e.target.value})}
-                          className="w-full rounded-lg border-gray-300 border p-3 focus:ring-2 focus:ring-emerald-500 outline-none text-lg" 
+        const PlayerCard = ({ player }) => (
+            <div className="bg-white rounded-xl shadow-md overflow-hidden hover:shadow-lg transition-shadow border border-gray-100 group relative">
+                <div className="h-48 bg-gray-200 relative overflow-hidden">
+                    {player.photo ? (
+                        <img 
+                            src={player.photo} 
+                            alt={player.name} 
+                            className="w-full h-full object-cover object-top transition-transform duration-500 group-hover:scale-105"
+                            onError={(e) => { e.target.src = 'https://placehold.co/400x400/e2e8f0/1e293b?text=Sem+Foto'; }}
                         />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">URL do Escudo (Logo)</label>
-                        <input 
-                          type="url" 
-                          value={teamInfo.logo} 
-                          onChange={(e) => setTeamInfo({...teamInfo, logo: e.target.value})}
-                          className="w-full rounded-lg border-gray-300 border p-3 focus:ring-2 focus:ring-emerald-500 outline-none text-sm font-mono text-gray-600" 
-                          placeholder="https://..."
-                        />
-                        <p className="text-xs text-gray-500 mt-1">Recomendado: Imagem quadrada, fundo transparente (PNG).</p>
-                      </div>
-
-                      {/* Preview Area */}
-                      <div className="bg-gray-100 p-6 rounded-lg flex items-center justify-center gap-4 mt-4">
-                        <div className="text-center">
-                          <p className="text-xs text-gray-500 uppercase font-bold mb-2">Pré-visualização</p>
-                          <div className="flex flex-col items-center">
-                            {teamInfo.logo ? (
-                              <img src={teamInfo.logo} className="h-24 w-24 object-contain mb-2" alt="Preview" />
-                            ) : (
-                              <div className="h-24 w-24 bg-gray-200 rounded-full flex items-center justify-center text-gray-400 mb-2">
-                                <Shield size={32} />
-                              </div>
-                            )}
-                            <span className="font-bold text-gray-800">{teamInfo.name}</span>
-                          </div>
+                    ) : (
+                        <div className="w-full h-full flex items-center justify-center bg-gray-100 text-gray-400">
+                            <User size={64} weight="light" />
                         </div>
-                      </div>
-
-                      <div className="pt-4 flex justify-end">
-                        <button 
-                          onClick={handleUpdateTeam}
-                          className="bg-emerald-600 text-white px-8 py-3 rounded-lg hover:bg-emerald-700 font-bold shadow-lg shadow-emerald-200 transition-all active:scale-95"
-                        >
-                          Salvar Alterações
-                        </button>
-                      </div>
+                    )}
+                    <div className="absolute top-2 right-2 bg-black/70 text-white font-bold text-sm px-2 py-1 rounded-md">
+                        #{player.number || '00'}
                     </div>
-                  </div>
                 </div>
-              )}
+                <div className="p-4">
+                    <div className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-1">
+                        {player.position}
+                    </div>
+                    <h3 className="font-bold text-gray-800 text-lg leading-tight truncate">{player.name}</h3>
+                    <p className="text-gray-500 text-sm mt-1">
+                        {player.dob ? `${new Date().getFullYear() - new Date(player.dob).getFullYear()} anos` : 'Idade N/A'}
+                    </p>
+                </div>
             </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
+        );
+
+        // --- App Principal ---
+        function TeamManagerApp() {
+            const [user, setUser] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [view, setView] = useState('public');
+            const [adminTab, setAdminTab] = useState('squad');
+            const [toast, setToast] = useState({ message: '', type: '' });
+            
+            // Dados
+            const [teamInfo, setTeamInfo] = useState({ name: 'VarzeaManager', logo: '' });
+            const [players, setPlayers] = useState([]);
+            const [sponsors, setSponsors] = useState([]);
+            
+            // Forms
+            const [editingPlayerId, setEditingPlayerId] = useState(null);
+            const [playerForm, setPlayerForm] = useState({ 
+                name: '', position: 'Atacante', number: '', dob: '', photo: '' 
+            });
+            
+            const [newSponsor, setNewSponsor] = useState({ name: '', value: '', paidMonths: [] });
+            const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
+            const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
+            const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+            // Auth
+            useEffect(() => {
+                const initAuth = async () => {
+                    try {
+                        // FIX: Agora usamos APENAS o login anônimo para o Firebase Hosting
+                        await signInAnonymously(auth);
+                    } catch (error) {
+                        console.error("Auth Error:", error);
+                        // Mensagem de erro mais genérica para o usuário
+                        showToast('Erro na autenticação. Verifique suas credenciais e regras do Firebase.', 'error');
+                    }
+                };
+                initAuth();
+
+                const unsubscribe = onAuthStateChanged(auth, (u) => {
+                    setUser(u);
+                    setLoading(false);
+                });
+                return () => unsubscribe();
+            }, []);
+
+            // Data Fetching
+            useEffect(() => {
+                if (!user) return;
+
+                const unsubSettings = onSnapshot(
+                    doc(db, 'artifacts', appId, 'public', 'data', 'teamSettings', 'config'),
+                    (docSnap) => {
+                        if (docSnap.exists()) {
+                            setTeamInfo(docSnap.data());
+                        } else {
+                            setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'teamSettings', 'config'), {
+                                name: 'VarzeaManager',
+                                logo: ''
+                            });
+                        }
+                    }
+                );
+
+                const unsubPlayers = onSnapshot(
+                    collection(db, 'artifacts', appId, 'public', 'data', 'squad'),
+                    (snapshot) => {
+                        const p = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+                        setPlayers(p.sort((a, b) => {
+                            if (a.position === 'Técnico' && b.position !== 'Técnico') return -1;
+                            if (b.position === 'Técnico' && a.position !== 'Técnico') return 1;
+                            return parseInt(a.number || '99') - parseInt(b.number || '99');
+                        }));
+                    }
+                );
+
+                const unsubSponsors = onSnapshot(
+                    collection(db, 'artifacts', appId, 'public', 'data', 'sponsors'),
+                    (snapshot) => {
+                        setSponsors(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+                    }
+                );
+
+                return () => {
+                    unsubSettings();
+                    unsubPlayers();
+                    unsubSponsors();
+                };
+            }, [user]);
+
+            // Handlers
+            const showToast = (msg, type = 'info') => {
+                setToast({ message: msg, type });
+            };
+
+            const handleUpdateTeam = async () => {
+                try {
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'teamSettings', 'config'), teamInfo);
+                    showToast('Informações do time atualizadas!', 'success');
+                } catch (e) {
+                    console.error(e);
+                    showToast('Erro ao atualizar time.', 'error');
+                }
+            };
+
+            const handleSavePlayer = async (e) => {
+                e.preventDefault();
+                if (!playerForm.name || !playerForm.position) {
+                    showToast('Preencha nome e posição!', 'error');
+                    return;
+                }
+
+                try {
+                    if (editingPlayerId) {
+                        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'squad', editingPlayerId), playerForm);
+                        showToast('Jogador atualizado!', 'success');
+                    } else {
+                        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'squad'), playerForm);
+                        showToast('Jogador adicionado!', 'success');
+                    }
+                    setPlayerForm({ name: '', position: 'Atacante', number: '', dob: '', photo: '' });
+                    setEditingPlayerId(null);
+                } catch (e) {
+                    console.error(e);
+                    showToast('Erro ao salvar jogador.', 'error');
+                }
+            };
+
+            const handleEditClick = (player) => {
+                setEditingPlayerId(player.id);
+                setPlayerForm({
+                    name: player.name || '',
+                    position: player.position || 'Atacante',
+                    number: player.number || '',
+                    dob: player.dob || '',
+                    photo: player.photo || ''
+                });
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            };
+
+            const handleCancelEdit = () => {
+                setEditingPlayerId(null);
+                setPlayerForm({ name: '', position: 'Atacante', number: '', dob: '', photo: '' });
+            };
+
+            const handleDeletePlayer = async (id) => {
+                if (!id) return;
+                if (!window.confirm("Remover este membro?")) return;
+                try {
+                    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'squad', id));
+                    if (editingPlayerId === id) handleCancelEdit();
+                    showToast('Removido com sucesso.', 'success');
+                } catch (e) {
+                    showToast('Erro ao remover.', 'error');
+                }
+            };
+
+            const handleAddSponsor = async (e) => {
+                e.preventDefault();
+                if (!newSponsor.name) return;
+                try {
+                    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'sponsors'), {
+                        ...newSponsor,
+                        value: parseFloat(newSponsor.value) || 0,
+                        paidMonths: []
+                    });
+                    setNewSponsor({ name: '', value: '', paidMonths: [] });
+                    showToast('Patrocinador adicionado!', 'success');
+                } catch (e) {
+                    showToast('Erro ao adicionar.', 'error');
+                }
+            };
+
+            const handleTogglePayment = async (sponsorId, currentPaidStatus) => {
+                const paymentKey = `${selectedYear}-${selectedMonth}`;
+                const sponsorRef = doc(db, 'artifacts', appId, 'public', 'data', 'sponsors', sponsorId);
+                try {
+                    if (currentPaidStatus) {
+                        await updateDoc(sponsorRef, { paidMonths: arrayRemove(paymentKey) });
+                    } else {
+                        await updateDoc(sponsorRef, { paidMonths: arrayUnion(paymentKey) });
+                    }
+                } catch (e) {
+                    showToast('Erro ao atualizar.', 'error');
+                }
+            };
+
+            const handleDeleteSponsor = async (id) => {
+                if (!window.confirm("Remover patrocinador?")) return;
+                try {
+                    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'sponsors', id));
+                    showToast('Patrocinador removido.', 'success');
+                } catch (e) {
+                    showToast('Erro ao remover.', 'error');
+                }
+            };
+
+            if (loading) return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-600"></div></div>;
+
+            const currentPaymentKey = `${selectedYear}-${selectedMonth}`;
+            const totalRevenue = sponsors.reduce((acc, curr) => acc + (curr.value || 0), 0);
+            const collectedThisMonth = sponsors.reduce((acc, curr) => {
+                return curr.paidMonths?.includes(currentPaymentKey) ? acc + (curr.value || 0) : acc;
+            }, 0);
+
+            return (
+                <div className="min-h-screen font-sans text-slate-800">
+                    <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: '', type: '' })} />
+
+                    {/* Navbar */}
+                    <nav className="bg-emerald-900 text-white shadow-lg sticky top-0 z-40">
+                        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                            <div className="flex items-center justify-between h-16">
+                                <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setView('public')}>
+                                    {teamInfo.logo ? (
+                                        <img src={teamInfo.logo} alt="Logo" className="h-10 w-10 object-contain bg-white rounded-full p-0.5" />
+                                    ) : (
+                                        <Shield className="h-8 w-8 text-emerald-400" size={32} weight="fill" />
+                                    )}
+                                    <span className="font-bold text-xl tracking-tight hidden sm:block">{teamInfo.name}</span>
+                                </div>
+
+                                <div className="hidden md:flex items-center space-x-4">
+                                    <button onClick={() => setView('public')} className={`px-3 py-2 rounded-md text-sm font-medium ${view === 'public' ? 'bg-emerald-800 text-white' : 'text-emerald-100 hover:bg-emerald-800'}`}>Página Pública</button>
+                                    <button onClick={() => setView('admin')} className={`px-3 py-2 rounded-md text-sm font-medium flex items-center gap-2 ${view === 'admin' ? 'bg-emerald-800 text-white' : 'text-emerald-100 hover:bg-emerald-800'}`}><Gear size={16} /> Área Administrativa</button>
+                                </div>
+                                <div className="md:hidden">
+                                    <button onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)} className="text-emerald-100 hover:text-white">{isMobileMenuOpen ? <X size={24} /> : <List size={24} />}</button>
+                                </div>
+                            </div>
+                        </div>
+                        {isMobileMenuOpen && (
+                            <div className="md:hidden bg-emerald-800 px-2 pt-2 pb-3 space-y-1 sm:px-3">
+                                <button onClick={() => { setView('public'); setIsMobileMenuOpen(false); }} className="block w-full text-left px-3 py-2 rounded-md text-base font-medium text-white hover:bg-emerald-700">Página Pública</button>
+                                <button onClick={() => { setView('admin'); setIsMobileMenuOpen(false); }} className="block w-full text-left px-3 py-2 rounded-md text-base font-medium text-white hover:bg-emerald-700">Área Administrativa</button>
+                            </div>
+                        )}
+                    </nav>
+
+                    {/* Conteúdo */}
+                    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+                        {view === 'public' && (
+                            <div className="space-y-12">
+                                <div className="bg-gradient-to-br from-emerald-800 to-emerald-600 rounded-3xl p-8 md:p-12 text-center text-white shadow-xl relative overflow-hidden">
+                                    <div className="absolute inset-0 opacity-10 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')]"></div>
+                                    <div className="relative z-10 flex flex-col items-center">
+                                        {teamInfo.logo && <img src={teamInfo.logo} className="h-32 w-32 md:h-40 md:w-40 object-contain bg-white rounded-full shadow-lg p-2 mb-6" />}
+                                        <h1 className="text-4xl md:text-6xl font-extrabold mb-2 tracking-tight">{teamInfo.name}</h1>
+                                        <p className="text-emerald-100 text-lg md:text-xl font-light">Site Oficial do Time</p>
+                                    </div>
+                                </div>
+                                <div>
+                                    <div className="flex items-center gap-3 mb-8"><Users className="text-emerald-700" size={32} weight="fill" /><h2 className="text-3xl font-bold text-gray-800">Nosso Elenco</h2></div>
+                                    {players.length === 0 ? <div className="text-center py-20 bg-white rounded-xl border border-dashed border-gray-300"><p className="text-gray-500">Nenhum jogador cadastrado ainda.</p></div> : 
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">{players.map(player => <PlayerCard key={player.id} player={player} />)}</div>
+                                    }
+                                </div>
+                                {sponsors.length > 0 && (
+                                    <div className="border-t border-gray-200 pt-10">
+                                        <h3 className="text-center text-gray-400 text-sm font-semibold uppercase tracking-widest mb-6">Nossos Parceiros</h3>
+                                        <div className="flex flex-wrap justify-center gap-8 opacity-70 grayscale hover:grayscale-0 transition-all duration-500">
+                                            {sponsors.map(s => <div key={s.id} className="text-xl font-bold text-emerald-800 flex items-center gap-2"><div className="h-2 w-2 bg-emerald-500 rounded-full"></div>{s.name}</div>)}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {view === 'admin' && (
+                            <div className="flex flex-col lg:flex-row gap-6">
+                                <div className="lg:w-64 flex-shrink-0">
+                                    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sticky top-24">
+                                        <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-4 px-2">Gerenciamento</h3>
+                                        <nav className="space-y-1">
+                                            <button onClick={() => setAdminTab('squad')} className={`w-full flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-colors ${adminTab === 'squad' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-600 hover:bg-gray-50'}`}><Users className="mr-3 h-5 w-5" /> Plantel</button>
+                                            <button onClick={() => setAdminTab('sponsors')} className={`w-full flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-colors ${adminTab === 'sponsors' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-600 hover:bg-gray-50'}`}><CurrencyDollar className="mr-3 h-5 w-5" /> Patrocinadores</button>
+                                            <button onClick={() => setAdminTab('settings')} className={`w-full flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-colors ${adminTab === 'settings' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-600 hover:bg-gray-50'}`}><Gear className="mr-3 h-5 w-5" /> Configurações</button>
+                                        </nav>
+                                    </div>
+                                </div>
+                                <div className="flex-1">
+                                    {adminTab === 'squad' && (
+                                        <div className="space-y-6">
+                                            <div className={`bg-white rounded-xl shadow-sm border transition-all duration-300 p-6 ${editingPlayerId ? 'border-amber-300 ring-2 ring-amber-100' : 'border-gray-200'}`}>
+                                                <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">{editingPlayerId ? <><PencilSimple className="text-amber-500" /> Editando</> : <><Plus className="text-emerald-600" /> Cadastrar</>}</h2>
+                                                <form onSubmit={handleSavePlayer} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                    <div className="md:col-span-2"><label className="block text-sm font-medium text-gray-700 mb-1">Nome</label><input required type="text" value={playerForm.name} onChange={e => setPlayerForm({...playerForm, name: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" /></div>
+                                                    <div><label className="block text-sm font-medium text-gray-700 mb-1">Posição</label><select value={playerForm.position} onChange={e => setPlayerForm({...playerForm, position: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 bg-white focus:ring-2 focus:ring-emerald-500 outline-none">{POSITIONS.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
+                                                    <div><label className="block text-sm font-medium text-gray-700 mb-1">Número</label><input type="number" value={playerForm.number} onChange={e => setPlayerForm({...playerForm, number: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" /></div>
+                                                    <div><label className="block text-sm font-medium text-gray-700 mb-1">Nascimento</label><input type="date" value={playerForm.dob} onChange={e => setPlayerForm({...playerForm, dob: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" /></div>
+                                                    <div><label className="block text-sm font-medium text-gray-700 mb-1">Foto (URL)</label><input type="url" value={playerForm.photo} onChange={e => setPlayerForm({...playerForm, photo: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" /></div>
+                                                    <div className="md:col-span-2 flex justify-end gap-3 mt-2">
+                                                        {editingPlayerId && <button type="button" onClick={handleCancelEdit} className="bg-gray-200 text-gray-700 px-6 py-2 rounded-lg hover:bg-gray-300 font-medium transition-colors flex items-center gap-2"><ArrowCounterClockwise size={18} /> Cancelar</button>}
+                                                        <button type="submit" className={`px-6 py-2 rounded-lg font-medium transition-colors flex items-center gap-2 text-white ${editingPlayerId ? 'bg-amber-500 hover:bg-amber-600' : 'bg-emerald-600 hover:bg-emerald-700'}`}>{editingPlayerId ? <><FloppyDisk size={18} /> Salvar</> : <><Plus size={18} /> Cadastrar</>}</button>
+                                                    </div>
+                                                </form>
+                                            </div>
+                                            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                                                <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center"><h2 className="font-bold text-gray-700">Membros Ativos ({players.length})</h2></div>
+                                                <ul className="divide-y divide-gray-200">
+                                                    {players.map(player => (
+                                                        <li key={player.id} className={`px-6 py-4 flex items-center justify-between hover:bg-gray-50 transition-colors ${editingPlayerId === player.id ? 'bg-amber-50' : ''}`}>
+                                                            <div className="flex items-center gap-4">
+                                                                <div className="h-10 w-10 rounded-full bg-gray-200 overflow-hidden flex-shrink-0">{player.photo ? <img src={player.photo} className="h-full w-full object-cover" /> : <User className="p-2 text-gray-400 h-full w-full" />}</div>
+                                                                <div><p className="font-medium text-gray-900">{player.name} {editingPlayerId === player.id && <span className="text-xs text-amber-600 font-bold ml-2">(Editando...)</span>}</p><p className="text-sm text-gray-500">{player.position} • Camisa {player.number}</p></div>
+                                                            </div>
+                                                            <div className="flex items-center gap-2">
+                                                                <button onClick={() => handleEditClick(player)} className="p-2 text-gray-400 hover:text-amber-500 hover:bg-amber-50 rounded-full"><PencilSimple size={18} /></button>
+                                                                <button onClick={() => handleDeletePlayer(player.id)} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-full"><Trash size={18} /></button>
+                                                            </div>
+                                                        </li>
+                                                    ))}
+                                                    {players.length === 0 && <li className="px-6 py-8 text-center text-gray-400 italic">Lista vazia.</li>}
+                                                </ul>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {adminTab === 'sponsors' && (
+                                        <div className="space-y-6">
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200"><p className="text-sm text-gray-500 uppercase font-bold">Total Previsto</p><p className="text-2xl font-bold text-gray-800">R$ {totalRevenue.toFixed(2)}</p></div>
+                                                <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200"><p className="text-sm text-gray-500 uppercase font-bold">Arrecadado ({MONTHS[selectedMonth]})</p><p className={`text-2xl font-bold ${collectedThisMonth < totalRevenue ? 'text-amber-600' : 'text-emerald-600'}`}>R$ {collectedThisMonth.toFixed(2)}</p></div>
+                                            </div>
+                                            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                                                <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2"><CurrencyDollar className="text-emerald-600" /> Novo Patrocinador</h2>
+                                                <form onSubmit={handleAddSponsor} className="flex flex-col md:flex-row gap-4 items-end">
+                                                    <div className="flex-1 w-full"><label className="block text-sm font-medium text-gray-700 mb-1">Nome</label><input required type="text" value={newSponsor.name} onChange={e => setNewSponsor({...newSponsor, name: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" /></div>
+                                                    <div className="w-full md:w-48"><label className="block text-sm font-medium text-gray-700 mb-1">Valor (R$)</label><input required type="number" step="0.01" value={newSponsor.value} onChange={e => setNewSponsor({...newSponsor, value: e.target.value})} className="w-full rounded-lg border-gray-300 border p-2 focus:ring-2 focus:ring-emerald-500 outline-none" /></div>
+                                                    <button type="submit" className="w-full md:w-auto bg-emerald-600 text-white px-6 py-2 rounded-lg hover:bg-emerald-700 font-medium transition-colors">Adicionar</button>
+                                                </form>
+                                            </div>
+                                            <div className="bg-white rounded-xl shadow-sm border border-gray-200">
+                                                <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
+                                                    <h2 className="font-bold text-gray-700">Controle</h2>
+                                                    <div className="flex items-center gap-2 bg-white px-3 py-1 rounded-md border border-gray-300">
+                                                        <CalendarBlank size={16} className="text-gray-500" />
+                                                        <select value={selectedMonth} onChange={(e) => setSelectedMonth(parseInt(e.target.value))} className="bg-transparent text-sm font-medium outline-none text-gray-700 cursor-pointer">{MONTHS.map((m, i) => <option key={i} value={i}>{m}</option>)}</select>
+                                                        <select value={selectedYear} onChange={(e) => setSelectedYear(parseInt(e.target.value))} className="bg-transparent text-sm font-medium outline-none text-gray-700 cursor-pointer border-l border-gray-200 pl-2"><option value={2024}>2024</option><option value={2025}>2025</option></select>
+                                                    </div>
+                                                </div>
+                                                <div className="overflow-x-auto">
+                                                    <table className="w-full text-left text-sm">
+                                                        <thead className="bg-gray-50 text-gray-500 font-medium uppercase tracking-wider"><tr><th className="px-6 py-3">Nome</th><th className="px-6 py-3">Valor</th><th className="px-6 py-3 text-center">Status</th><th className="px-6 py-3 text-right">Ações</th></tr></thead>
+                                                        <tbody className="divide-y divide-gray-200">
+                                                            {sponsors.map(sponsor => {
+                                                                const isPaid = sponsor.paidMonths?.includes(currentPaymentKey);
+                                                                return (
+                                                                    <tr key={sponsor.id} className="hover:bg-gray-50 transition-colors">
+                                                                        <td className="px-6 py-4 font-medium text-gray-900">{sponsor.name}</td>
+                                                                        <td className="px-6 py-4 text-gray-600">R$ {sponsor.value?.toFixed(2)}</td>
+                                                                        <td className="px-6 py-4 text-center"><button onClick={() => handleTogglePayment(sponsor.id, isPaid)} className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold border transition-all ${isPaid ? 'bg-green-100 text-green-700 border-green-200 hover:bg-green-200' : 'bg-red-50 text-red-600 border-red-200 hover:bg-red-100'}`}>{isPaid ? <><CheckCircle size={14} /> PAGO</> : <><XCircle size={14} /> PENDENTE</>}</button></td>
+                                                                        <td className="px-6 py-4 text-right"><button onClick={() => handleDeleteSponsor(sponsor.id)} className="text-gray-400 hover:text-red-600"><Trash size={16} /></button></td>
+                                                                    </tr>
+                                                                );
+                                                            })}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {adminTab === 'settings' && (
+                                        <div className="max-w-2xl mx-auto space-y-6">
+                                            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-8">
+                                                <h2 className="text-xl font-bold text-gray-800 mb-6 pb-2 border-b border-gray-100">Identidade</h2>
+                                                <div className="space-y-4">
+                                                    <div><label className="block text-sm font-medium text-gray-700 mb-1">Nome do Time</label><input type="text" value={teamInfo.name} onChange={(e) => setTeamInfo({...teamInfo, name: e.target.value})} className="w-full rounded-lg border-gray-300 border p-3 focus:ring-2 focus:ring-emerald-500 outline-none text-lg" /></div>
+                                                    <div><label className="block text-sm font-medium text-gray-700 mb-1">URL do Escudo</label><input type="url" value={teamInfo.logo} onChange={(e) => setTeamInfo({...teamInfo, logo: e.target.value})} className="w-full rounded-lg border-gray-300 border p-3 focus:ring-2 focus:ring-emerald-500 outline-none text-sm font-mono text-gray-600" /></div>
+                                                    <div className="pt-4 flex justify-end"><button onClick={handleUpdateTeam} className="bg-emerald-600 text-white px-8 py-3 rounded-lg hover:bg-emerald-700 font-bold shadow-lg shadow-emerald-200 transition-all active:scale-95">Salvar</button></div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<TeamManagerApp />);
+    </script>
+</body>
+</html>
